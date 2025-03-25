@@ -1,110 +1,144 @@
+// AXI Slave IF for Xilinx PS 
+// Without Support : S_WLAST & Burst 
+// FPGA PS --> AXI Slave --> RAXI 
 
---> 設計一個 精簡版 Reduced IO AXI-Lite Slave 包含 256個 32-bit register 
+`timescale 1ns / 1ps
 
-1. IO 定義 
-module raxi_device (
-    input  wire         RESETn,      // System Reset 
-    input  wire         iclk,        // System Clock 
-	// RAXI Interface 
-    input  wire         raxi_rvalid,  // CPU Read 
-	input  wire         raxi_wvalid,  // CPU Write   
-	output reg          raxi_ready,   // Slave Ready   
-    input  wire [31:0]  raxi_address, // Address 0xFFFFFF00~  
-    input  wire [31:0]  raxi_wdata,   // Write Data 
-    output reg  [31:0]  raxi_rdata,   // Read Data  
-	
+module axi_slave #(
+    parameter C_AXI_ID_WIDTH   = 4,
+    parameter C_AXI_DATA_WIDTH = 32,
+    parameter C_AXI_ADDR_WIDTH = 32,
+    parameter SLAVE_ADDR       = 8'h00  // Slave Address
+)
+(
+    input  wire                      S_ACLK,
+    input  wire                      S_ARESETN,
+
+    // AXI Write Address Channel
+    input  wire [C_AXI_ID_WIDTH-1:0]   S_AWID,
+    input  wire [C_AXI_ADDR_WIDTH-1:0] S_AWADDR,
+    input  wire [2:0]                  S_AWPROT,
+    input  wire [7:0]                  S_AWLEN,
+    input  wire                        S_AWVALID,
+    output reg                         S_AWREADY,
+
+    // AXI Write Data Channel
+    input  wire [C_AXI_DATA_WIDTH-1:0]     S_WDATA,
+    input  wire [(C_AXI_DATA_WIDTH/8)-1:0] S_WSTRB,
+    input  wire                            S_WVALID,
+    output reg                             S_WREADY,
+
+    // AXI Write Response Channel
+    output reg [C_AXI_ID_WIDTH-1:0] S_BID,
+    output reg [1:0]                S_BRESP,
+    output reg                      S_BVALID,
+    input  wire                     S_BREADY,
+
+    // AXI Read Address Channel
+    input  wire [C_AXI_ID_WIDTH-1:0]   S_ARID,
+    input  wire [C_AXI_ADDR_WIDTH-1:0] S_ARADDR,
+    input  wire [2:0]                  S_ARPROT,
+    input  wire [7:0]                  S_ARLEN,
+    input  wire                        S_ARVALID,
+    output reg                         S_ARREADY,
+
+    // AXI Read Data Channel
+    output reg [C_AXI_ID_WIDTH-1:0]    S_RID,
+    output wire [C_AXI_DATA_WIDTH-1:0] S_RDATA,
+    output reg [1:0]                   S_RRESP,
+    output reg                         S_RLAST,
+    output reg                         S_RVALID,
+    input  wire                        S_RREADY,
+
+    // External Control Interface
+    output wire                      raxi_rvalid,
+    output wire                      raxi_wvalid,
+    input  wire                      raxi_ready,
+    output wire [31:0]               raxi_address,
+    output wire [31:0]               raxi_wdata,
+    input  wire [31:0]               raxi_rdata
 );
-2.  internal register 
-    (1) 16 個 32-bit register  Slave_reg [0:15]  // 16個 32-bit 內部暫存器 
-    (2) reg raxi_ready  //  指示 Slave 完成交易    
-	(3) reg clk_count;  // 8-bit counter to generate signal output    
-	
-3.  這slave包含 FSM: State_IDLE, State_READ, State_WRITE 三個 states  
-	
-4.  16 個 register 位址定義  0xFFFFFFF0 ~ 0xFFFFFFFF  
-	
-5.  以下是整個 Slave FSM operation Description 
-       	   	   
-    State_IDLE:  
-        if(raxi_rvalid)   
-		       state = State_READ 	    			
-        else if(raxi_wvalid) state = State_WRITE 
-                
-    State_READ:     
-	  raxi_rdata <= Slave_reg[raxi_address[5:2]]    // 1 Byte = 1個 address , 32-bit 占用 4個  
-	  raxi_ready = 1                // 表示完成讀取  
-	  if(raxi_rvalid=0)             // 表示 CPU 確認  
-         raxi_ready=0               // 完成交易 
-         state = State_IDLE;        // 回到 IDLE 
-      end   		 	  	  
-	  
-	State_WRITE: 
-      Slave_reg[raxi_address[5:2]] = raxi_wdata 
-	  raxi_ready = 1                // 表示完成寫入   
-	  if(raxi_wvalid=0)             // 表示 CPU 確認  
-         raxi_ready=0               // 完成交易 
-         state = State_IDLE;        // 回到 IDLE 
-      end
- 	
 
+// Internal state
+reg [7:0] data_count;
+reg [2:0] state;
+localparam IDLE = 3'd0, WRITE_ADDR = 3'd1, WRITE_DATA = 3'd2, WRITE_RESP = 3'd3, READ_ADDR = 3'd4, READ_DATA = 3'd5;
 
-	
- --> 替這個 Reduced IO AXI-Lite Slave verilog 設計一個 testbench 
+assign raxi_rvalid = S_RVALID & S_RREADY;
+assign raxi_wvalid = S_WVALID & S_WREADY;
+assign raxi_address = (state==WRITE_DATA) ? S_AWADDR : S_ARADDR;
+assign raxi_wdata = S_WDATA;
+assign S_RDATA = raxi_rdata;
 
-1.  產生 RAXI 寫入 與 讀取 訊號 , 比對資料 
-    (0) 輸出控制訊號 raxi_rvalid , raxi_wvalid
-    (1) wait(raxi_ready)  等待 Slave ready 	
-    (2) 連續寫入 16個 data , 位址 0xFFFFFF00 ~ 0xFFFFFF40 
-	(3) 連續讀出 16個 data 
-    (4) 列印 讀寫過程  	
-    (5) 比對 讀寫資料是否一致 
-    (6) 使用 task 簡化testbench    	
+always @(posedge S_ACLK) begin
+    if (!S_ARESETN) begin
+        state      <= IDLE;
+        S_AWREADY  <= 1'b0;
+        S_WREADY   <= 1'b0;
+        S_BVALID   <= 1'b0;
+        S_BRESP    <= 2'b00;
+        S_BID      <= {C_AXI_ID_WIDTH{1'b0}};
+        S_ARREADY  <= 1'b0;
+        S_RVALID   <= 1'b0;
+        S_RRESP    <= 2'b00;
+        S_RLAST    <= 1'b0;
+        S_RID      <= {C_AXI_ID_WIDTH{1'b0}};
+        data_count <= 0;
+    end else begin
+        case(state)
+            IDLE: begin
+                S_AWREADY <= S_AWVALID && (S_AWADDR[31:24]==SLAVE_ADDR);
+                S_ARREADY <= ~S_AWREADY && S_ARVALID && (S_ARADDR[31:24]==SLAVE_ADDR);
+                if (S_AWREADY) state <= WRITE_ADDR;
+                else if (S_ARREADY) state <= READ_ADDR;
+            end
 
-2.  產生 VCD waveform   
+            WRITE_ADDR: begin
+                S_AWREADY <= 1'b0;
+                S_WREADY  <= 1'b1;
+                state     <= WRITE_DATA;
+                data_count<= 0;
+            end
 
-3. 參考以下 task design  
-task write_register;
-    input [ADDR_WIDTH-1:0] addr;
-    input [DATA_WIDTH-1:0] data;
-    begin
-        raxi_wvalid  = 1'b1;
-        raxi_rvalid  = 1'b0;
-        raxi_address = addr;
-        raxi_wdata   = data;
-        @(posedge iclk);
-        #(1);
-        while (~raxi_ready) @(posedge iclk);
-        @(posedge iclk);
-        raxi_wvalid  = 1'b0;
-        @(posedge iclk);
-        #(1);
+            WRITE_DATA: begin
+                if (S_WVALID && S_WREADY) begin
+                    if (data_count == S_AWLEN) begin
+                        S_WREADY <= 1'b0;
+                        state    <= WRITE_RESP;
+                        S_BID    <= S_AWID;
+                        S_BRESP  <= 2'b00;
+                        S_BVALID <= 1'b1;
+                    end else data_count <= data_count + 1;
+                end
+            end
+
+            WRITE_RESP: begin
+                if (S_BVALID && S_BREADY) begin
+                    S_BVALID <= 1'b0;
+                    state    <= IDLE;
+                end
+            end
+
+            READ_ADDR: begin
+                S_ARREADY <= 1'b0;
+                S_RVALID  <= 1'b1;
+                S_RRESP   <= 2'b00;
+                S_RID     <= S_ARID;
+                state     <= READ_DATA;
+                data_count<= 0;
+            end
+
+            READ_DATA: begin
+                if (S_RVALID && S_RREADY) begin
+                    S_RLAST <= (data_count == S_ARLEN);
+                    if (data_count == S_ARLEN) begin
+                        S_RVALID <= 1'b0;
+                        S_RLAST  <= 1'b0;
+                        state    <= IDLE;
+                    end else data_count <= data_count + 1;
+                end
+            end
+        endcase
     end
-endtask
-
-// ---------------------------------------
-// Read Task
-// ---------------------------------------
-task read_register;
-    input [ADDR_WIDTH-1:0] addr;
-    output [DATA_WIDTH-1:0] read_data;
-    begin
-        raxi_wvalid  = 1'b0;
-        raxi_rvalid  = 1'b1;
-        raxi_address = addr;
-        @(posedge iclk);
-        #(1);
-        while (~raxi_ready) @(posedge iclk);
-        @(posedge iclk);
-        read_data    = raxi_rdata;
-        raxi_rvalid  = 1'b0;
-        @(posedge iclk);
-        #(1);
-    end
-endtask
-
-
-
--->  替這個 Reduced IO AXI-Lite Slave verilog 與 testbench 撰寫 Makefile 
-     使用 iverilog 與 gtkwave 
-	 
-	 
+end
+endmodule
