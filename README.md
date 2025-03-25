@@ -1,2 +1,2 @@
-# SPI-_Flash_Controller
+# SPI_Flash_Controller
 SPI Flash Controller Verilog Design
